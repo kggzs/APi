@@ -15,6 +15,9 @@ header('Content-Type: text/html; charset=UTF-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: SAMEORIGIN');
 
+// 管理页面密码（请修改为您自己的密码）
+$adminPassword = 'admin123'; // 请修改此密码
+
 // 步骤1：创建根级ip文件夹（统一存储所有归档文件）
 $rootIpFolder = 'ip';
 if (!is_dir($rootIpFolder)) {
@@ -365,27 +368,32 @@ function detectVpnAndAnalyzeSourceIp($ip) {
         $result['detection_methods'][] = '检测到Tor网络标识头部';
     }
     
-    // 方法4：调用IP检测API检查是否为VPN/代理
-    try {
-        // 使用 ip-api.com 检测代理（需要pro版本支持）
-        // 或使用其他免费API如 ip-api.com/json/{ip}?fields=proxy,hosting
-        $apiUrl = "http://ip-api.com/json/{$ip}?fields=status,country,isp,org,query,proxy,hosting";
-        
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $apiUrl,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 5,
-            CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_USERAGENT => 'Mozilla/5.0',
-        ]);
-        
-        $apiResponse = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        
-        if ($httpCode === 200 && !empty($apiResponse)) {
+    // 方法4：调用IP检测API检查是否为VPN/代理（如果前面已检测到，跳过API调用以提升速度）
+    // 如果已经通过其他方法检测到VPN/代理/Tor且置信度较高，跳过API调用
+    if (!($result['is_vpn'] && $result['confidence'] > 50) && 
+        !($result['is_proxy'] && $result['confidence'] > 50) && 
+        !$result['is_tor']) {
+        // 只有在不确定的情况下才调用API
+        try {
+            // 使用 ip-api.com 检测代理（需要pro版本支持）
+            // 或使用其他免费API如 ip-api.com/json/{ip}?fields=proxy,hosting
+            $apiUrl = "http://ip-api.com/json/{$ip}?fields=status,country,isp,org,query,proxy,hosting";
+            
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $apiUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 1, // 减少到1秒（快速失败）
+                CURLOPT_CONNECTTIMEOUT => 1, // 连接超时1秒
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_USERAGENT => 'Mozilla/5.0',
+            ]);
+            
+            $apiResponse = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($httpCode === 200 && !empty($apiResponse)) {
             $ipInfo = json_decode($apiResponse, true);
             if (!empty($ipInfo) && ($ipInfo['status'] ?? '') === 'success') {
                 $result['ip_info'] = [
@@ -446,10 +454,11 @@ function detectVpnAndAnalyzeSourceIp($ip) {
                     $result['detection_methods'][] = 'IP检测API确认该IP为代理';
                 }
             }
+            } // 结束 if ($httpCode === 200)
+        } catch (Exception $e) {
+            // 静默失败，不影响主流程
         }
-    } catch (Exception $e) {
-        // 静默失败，不影响主流程
-    }
+    } // 如果前面已检测到VPN/代理/Tor，跳过此API调用
     
     // 方法5：检查REMOTE_ADDR与获取的IP是否不同（可能是代理或CDN）
     $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -521,8 +530,8 @@ function getIpLocation($ip) {
         return '本地主机 - 内网环境（已锁定设备MAC地址）';
     }
     
-    // 创建缓存目录（用于缓存IP定位结果，提高性能）
-    $cacheDir = 'ip_cache';
+    // 创建缓存目录（用于缓存IP定位结果，提高性能，放在ip文件夹下）
+    $cacheDir = 'ip/ip_cache';
     if (!is_dir($cacheDir)) {
         @mkdir($cacheDir, 0755, true);
         @chmod($cacheDir, 0755);
@@ -544,16 +553,16 @@ function getIpLocation($ip) {
     $apiUrl = "http://ip-api.com/json/{$ip}?lang=zh-CN";
     $ch = curl_init();
     
-    // 构建curl选项数组
+    // 构建curl选项数组（优化性能：快速失败机制）
     $curlOptions = [
         CURLOPT_URL => $apiUrl,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 5, // 减少超时时间（5秒足够）
-        CURLOPT_CONNECTTIMEOUT => 3, // 连接超时3秒
+        CURLOPT_TIMEOUT => 1, // 减少超时时间到1秒（快速失败）
+        CURLOPT_CONNECTTIMEOUT => 1, // 连接超时1秒（快速失败）
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => false,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS => 3,
+        CURLOPT_FOLLOWLOCATION => false, // 禁用重定向（减少等待）
+        CURLOPT_MAXREDIRS => 0, // 无重定向
         CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         CURLOPT_HTTPHEADER => [
             'Accept: application/json',
@@ -890,11 +899,75 @@ if (isset($_POST['js_client_info']) && is_string($_POST['js_client_info'])) {
     $jsClientInfo = @json_decode($_POST['js_client_info'], true) ?: [];
 }
 
+// 辅助函数：将数字日期转换为中文日期（如：2026年1月17日 -> 二〇二六年一月十七日）
+function convertDateToChinese($dateStr) {
+    $chineseNumbers = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+    $chineseUnits = ['', '十', '百', '千'];
+    
+    // 解析日期字符串
+    if (preg_match('/(\d{4})年(\d{1,2})月(\d{1,2})日/', $dateStr, $matches)) {
+        $year = $matches[1];
+        $month = (int)$matches[2];
+        $day = (int)$matches[3];
+        
+        // 转换年份
+        $yearChinese = '';
+        for ($i = 0; $i < strlen($year); $i++) {
+            $yearChinese .= $chineseNumbers[(int)$year[$i]];
+        }
+        
+        // 转换月份
+        $monthChinese = '';
+        if ($month < 10) {
+            $monthChinese = $chineseNumbers[$month];
+        } elseif ($month == 10) {
+            $monthChinese = '十';
+        } elseif ($month < 20) {
+            $monthChinese = '十' . $chineseNumbers[$month % 10];
+        } else {
+            $monthChinese = $chineseNumbers[floor($month / 10)] . '十' . ($month % 10 > 0 ? $chineseNumbers[$month % 10] : '');
+        }
+        
+        // 转换日期
+        $dayChinese = '';
+        if ($day < 10) {
+            $dayChinese = $chineseNumbers[$day];
+        } elseif ($day == 10) {
+            $dayChinese = '十';
+        } elseif ($day < 20) {
+            $dayChinese = '十' . $chineseNumbers[$day % 10];
+        } elseif ($day < 30) {
+            $dayChinese = '二十' . ($day % 10 > 0 ? $chineseNumbers[$day % 10] : '');
+        } else {
+            $dayChinese = '三十' . ($day % 10 > 0 ? $chineseNumbers[$day % 10] : '');
+        }
+        
+        return $yearChinese . '年' . $monthChinese . '月' . $dayChinese . '日';
+    }
+    
+    // 如果格式不匹配，返回原字符串
+    return $dateStr;
+}
+
 // 步骤8：核心逻辑执行（获取所有信息）
 $clientIp = getClientRealIp();
 $ipLocation = getIpLocation($clientIp);
 $vpnDetection = detectVpnAndAnalyzeSourceIp($clientIp); // VPN/代理检测
 $browserAllInfo = collectBrowserAllInfo();
+
+// 转换日期格式（用于中文日期显示）
+$chineseDate = convertDateToChinese(date('Y年n月j日'));
+
+// 生成浏览器指纹（用于备案号）
+$browserFingerprint = '';
+$fingerprintData = [
+    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+    'accept_language' => $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '',
+    'accept_encoding' => $_SERVER['HTTP_ACCEPT_ENCODING'] ?? '',
+    'accept' => $_SERVER['HTTP_ACCEPT'] ?? '',
+    'connection' => $_SERVER['HTTP_CONNECTION'] ?? '',
+];
+$browserFingerprint = strtoupper(substr(md5(implode('|', $fingerprintData)), 0, 8));
 
 // 将JavaScript收集的信息完整合并到浏览器信息中（移除独立分类，整合到对应分类）
 if (!empty($jsClientInfo)) {
@@ -1212,8 +1285,16 @@ foreach ($browserAllInfo as $infoType => $infoDetails) {
 $detailedLogContent .= "=== 记录结束 ===\n";
 
 // 步骤10：写入简易信息（按日期生成log文件，存放于ip根文件夹）
+// 只在非JavaScript请求时写入，避免重复记录
 $simpleLogFileName = "{$rootIpFolder}/access_simple_{$accessDate}.txt";
 
+// 检查是否为JavaScript请求（避免重复记录）
+$postKeys = array_keys($_POST ?? []);
+$isJsOnlyRequest = isset($_POST['js_client_info']) && 
+                   empty($_GET) && 
+                   (empty($postKeys) || (count($postKeys) === 1 && $postKeys[0] === 'js_client_info'));
+
+if (!$isJsOnlyRequest) {
 // 当日简易log文件不存在则创建并写入头部
 if (!file_exists($simpleLogFileName)) {
     $createSimpleFile = @fopen($simpleLogFileName, 'w');
@@ -1226,15 +1307,13 @@ if (!file_exists($simpleLogFileName)) {
 }
 // 追加写入当日简易记录
 @file_put_contents($simpleLogFileName, $simpleLogContent, FILE_APPEND | LOCK_EX);
+}
 
 // 步骤11：写入详细信息（以IP为文件名，存放于当日日期子文件夹）
 $detailedFileName = "{$dateFolderPath}/{$clientIp}.txt"; // 路径：ip/2026-01-16/127.0.0.1.txt
 
-// 如果只是JavaScript信息提交（只包含js_client_info），则追加补充信息到现有文件
-$postKeys = array_keys($_POST ?? []);
-$isJsOnlyRequest = isset($_POST['js_client_info']) && 
-                   empty($_GET) && 
-                   (empty($postKeys) || (count($postKeys) === 1 && $postKeys[0] === 'js_client_info'));
+// 检查是否为重复IP访问（文件已存在）
+$isRepeatAccess = file_exists($detailedFileName) && !$isJsOnlyRequest;
 
 if ($isJsOnlyRequest && !empty($jsClientInfo) && file_exists($detailedFileName)) {
     // JavaScript单独提交时，生成整合后的补充信息（仅包含JS收集的新信息）
@@ -1338,10 +1417,767 @@ if ($isJsOnlyRequest && !empty($jsClientInfo) && file_exists($detailedFileName))
     // 不输出HTML，只返回200状态码
     http_response_code(200);
     exit;
+} elseif ($isRepeatAccess) {
+    // 重复IP访问，只记录访问时间
+    $accessTimeRecord = "  → 再次访问时间：{$accessTime}\n";
+    @file_put_contents($detailedFileName, $accessTimeRecord, FILE_APPEND | LOCK_EX);
 } else {
-    // 正常写入详细信息（首次访问或包含其他数据）- JS信息已整合在$browserAllInfo中
+    // 首次访问，写入完整详细信息 - JS信息已整合在$browserAllInfo中
     @file_put_contents($detailedFileName, $detailedLogContent . "\n\n", FILE_APPEND | LOCK_EX);
     @chmod($detailedFileName, 0644);
+}
+
+// 步骤11.5：更新每日统计文件（只在非JavaScript请求时更新，避免重复记录）
+if (!$isJsOnlyRequest) {
+    $statsFileName = "{$rootIpFolder}/stats_{$accessDate}.txt";
+    
+    // 读取现有统计数据（JSON格式存储）
+    $statsData = [
+        'total_visits' => 0,
+        'unique_ips' => [],
+        'repeat_visits' => 0,
+        'visit_times' => []
+    ];
+    
+    if (file_exists($statsFileName)) {
+        // 尝试读取JSON格式的统计文件（如果有隐藏的JSON数据）
+        $statsJsonFile = $statsFileName . '.json';
+        if (file_exists($statsJsonFile)) {
+            $jsonData = @json_decode(file_get_contents($statsJsonFile), true);
+            if ($jsonData && is_array($jsonData)) {
+                $statsData = $jsonData;
+            }
+        } else {
+            // 如果没有JSON文件，从文本文件中解析
+            $statsContent = @file_get_contents($statsFileName);
+            if ($statsContent) {
+                // 提取统计数据
+                if (preg_match('/总访问次数：(\d+)/', $statsContent, $matches)) {
+                    $statsData['total_visits'] = (int)$matches[1];
+                }
+                if (preg_match('/重复访问次数：(\d+)/', $statsContent, $matches)) {
+                    $statsData['repeat_visits'] = (int)$matches[1];
+                }
+                // 提取IP列表
+                if (preg_match_all('/- ([\d\.]+)/', $statsContent, $matches)) {
+                    $statsData['unique_ips'] = array_unique($matches[1]);
+                }
+            }
+        }
+    }
+    
+    // 更新统计数据
+    $statsData['total_visits']++;
+    
+    if (!$isRepeatAccess) {
+        // 首次访问，添加到独立IP列表
+        if (!in_array($clientIp, $statsData['unique_ips'])) {
+            $statsData['unique_ips'][] = $clientIp;
+        }
+    } else {
+        // 重复访问，增加重复访问次数
+        $statsData['repeat_visits']++;
+    }
+    
+    // 记录访问时间（最多保留50条）
+    $statsData['visit_times'][] = $accessTime;
+    if (count($statsData['visit_times']) > 50) {
+        $statsData['visit_times'] = array_slice($statsData['visit_times'], -50);
+    }
+    
+    // 保存JSON格式的统计数据（便于下次读取）
+    $statsJsonFile = $statsFileName . '.json';
+    @file_put_contents($statsJsonFile, json_encode($statsData, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+    @chmod($statsJsonFile, 0644);
+    
+    // 生成统计文件内容（人类可读格式）
+    $statsContent = "=== 每日访问统计 ===\n";
+    $statsContent .= "统计日期：{$accessDate}\n";
+    $statsContent .= "最后更新：{$accessTime}\n";
+    $statsContent .= "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+    $statsContent .= "【访问统计】\n";
+    $statsContent .= "总访问次数：{$statsData['total_visits']}\n";
+    $statsContent .= "独立IP数量：" . count($statsData['unique_ips']) . "\n";
+    $statsContent .= "重复访问次数：{$statsData['repeat_visits']}\n";
+    $statsContent .= "新访问次数：" . ($statsData['total_visits'] - $statsData['repeat_visits']) . "\n\n";
+    
+    // IP列表（所有IP）
+    $statsContent .= "【IP列表】（共 " . count($statsData['unique_ips']) . " 个）\n";
+    foreach ($statsData['unique_ips'] as $ip) {
+        $statsContent .= "  - {$ip}\n";
+    }
+    
+    // 访问时间（最近20条）
+    $statsContent .= "\n【最近访问时间】（最近20条，共 " . count($statsData['visit_times']) . " 条）\n";
+    $recentVisits = array_slice($statsData['visit_times'], -20);
+    foreach ($recentVisits as $time) {
+        $statsContent .= "  - {$time}\n";
+    }
+    
+    $statsContent .= "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+    $statsContent .= "说明：本文件自动生成，记录每日访问统计信息\n";
+    
+    // 写入统计文件
+    @file_put_contents($statsFileName, $statsContent, LOCK_EX);
+    @chmod($statsFileName, 0644);
+}
+
+// 管理页面检查（在正常流程之前）
+if (isset($_GET['admin']) && $_GET['admin'] === $adminPassword) {
+    // 显示管理页面
+    $action = $_GET['action'] ?? '';
+    $viewFile = $_GET['file'] ?? '';
+    
+?>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日志管理系统</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background: #f5f5f5;
+            font-family: "Microsoft YaHei", "SimHei", Arial, sans-serif;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .header {
+            border-bottom: 2px solid #1890ff;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            color: #1890ff;
+            font-size: 24px;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 14px;
+            color: #666;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+        }
+        .tab.active {
+            color: #1890ff;
+            border-bottom-color: #1890ff;
+        }
+        .tab:hover {
+            color: #1890ff;
+        }
+        .content-area {
+            margin-top: 20px;
+        }
+        .file-list {
+            list-style: none;
+        }
+        .file-item {
+            padding: 12px;
+            border: 1px solid #e8e8e8;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s;
+        }
+        .file-item:hover {
+            background: #f5f5f5;
+            border-color: #1890ff;
+        }
+        .file-name {
+            font-weight: 500;
+            color: #262626;
+            }
+        .file-size {
+            color: #8c8c8c;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .file-date {
+            color: #8c8c8c;
+            font-size: 12px;
+        }
+        .btn {
+            padding: 6px 16px;
+            border: 1px solid #1890ff;
+            background: #1890ff;
+            color: #fff;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+        .btn:hover {
+            background: #40a9ff;
+            border-color: #40a9ff;
+        }
+        .btn-secondary {
+            background: #fff;
+            color: #1890ff;
+        }
+        .btn-secondary:hover {
+            background: #e6f7ff;
+        }
+        .log-content {
+            background: #fafafa;
+            border: 1px solid #e8e8e8;
+            border-radius: 4px;
+            padding: 15px;
+            max-height: 600px;
+            overflow-y: auto;
+            font-family: "Courier New", monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .back-btn {
+            margin-bottom: 15px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
+            color: #fff;
+            padding: 20px;
+            border-radius: 4px;
+        }
+        .stat-card h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        .stat-card .value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .date-folder {
+            margin-bottom: 30px;
+        }
+        .date-folder h3 {
+            color: #262626;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        .date-selector {
+            background: #fafafa;
+            border: 1px solid #e8e8e8;
+            border-radius: 4px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .date-selector h3 {
+            color: #262626;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+        .date-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 10px;
+        }
+        .date-item {
+            padding: 10px 15px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #fff;
+            text-decoration: none;
+            color: #262626;
+            display: block;
+        }
+        .date-item:hover {
+            border-color: #1890ff;
+            background: #e6f7ff;
+            color: #1890ff;
+        }
+        .date-item.active {
+            border-color: #1890ff;
+            background: #1890ff;
+            color: #fff;
+        }
+        .date-item .date-text {
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .date-item .file-count {
+            font-size: 12px;
+            margin-top: 5px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 日志管理系统</h1>
+        </div>
+        
+        <div class="tabs">
+            <button class="tab <?php echo $action === '' || $action === 'home' ? 'active' : ''; ?>" onclick="window.location.href='?admin=<?php echo $adminPassword; ?>'">🏠 首页</button>
+            <button class="tab <?php echo $action === 'list' ? 'active' : ''; ?>" onclick="window.location.href='?admin=<?php echo $adminPassword; ?>&action=list'">📁 简易信息</button>
+            <button class="tab <?php echo $action === 'detailed' ? 'active' : ''; ?>" onclick="window.location.href='?admin=<?php echo $adminPassword; ?>&action=detailed'">📄 详细信息</button>
+            <button class="tab <?php echo $action === 'stats' ? 'active' : ''; ?>" onclick="window.location.href='?admin=<?php echo $adminPassword; ?>&action=stats'">📊 统计信息</button>
+        </div>
+        
+        <div class="content-area">
+            <?php
+            if ($action === 'view' && $viewFile) {
+                // 查看单个文件内容
+                $filePath = urldecode($viewFile);
+                $backAction = 'list';
+                $backUrl = '?admin=' . $adminPassword . '&action=' . $backAction;
+                
+                // 根据文件类型判断返回的标签页
+                if (strpos($filePath, 'stats_') !== false) {
+                    $backAction = 'stats';
+                    $backUrl = '?admin=' . $adminPassword . '&action=' . $backAction;
+                } elseif (is_dir(dirname($filePath)) && strpos($filePath, '/') !== false && strpos(dirname($filePath), $rootIpFolder) !== false) {
+                    // 检查是否在日期文件夹中（详细信息）
+                    $parentDir = basename(dirname($filePath));
+                    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $parentDir)) {
+                        $backAction = 'detailed';
+                        $backUrl = '?admin=' . $adminPassword . '&action=' . $backAction . '&date=' . urlencode($parentDir);
+                    }
+                }
+                
+                if (file_exists($filePath) && strpos(realpath($filePath), realpath($rootIpFolder)) !== false) {
+                    echo '<div class="back-btn"><a href="' . $backUrl . '" class="btn btn-secondary">← 返回列表</a></div>';
+                    echo '<h3 style="margin-bottom: 15px;">文件：' . htmlspecialchars(basename($filePath)) . '</h3>';
+                    echo '<div class="log-content">' . htmlspecialchars(file_get_contents($filePath)) . '</div>';
+                } else {
+                    echo '<p style="color: #ff4d4f;">文件不存在或无权访问</p>';
+                }
+            } elseif ($action === 'stats') {
+                // 显示统计文件列表
+                $statsFiles = glob($rootIpFolder . '/stats_*.txt');
+                
+                if (empty($statsFiles)) {
+                    echo '<p style="color: #8c8c8c;">暂无统计文件</p>';
+                } else {
+                    // 总体统计
+                    $allStatsData = [
+                        'total_visits' => 0,
+                        'total_unique_ips' => 0,
+                        'total_repeat_visits' => 0,
+                        'date_count' => count($statsFiles)
+                    ];
+                    
+                    foreach ($statsFiles as $statsFile) {
+                        $content = @file_get_contents($statsFile);
+                        if ($content) {
+                            if (preg_match('/总访问次数：(\d+)/', $content, $matches)) {
+                                $allStatsData['total_visits'] += (int)$matches[1];
+                            }
+                            if (preg_match('/独立IP数量：(\d+)/', $content, $matches)) {
+                                $allStatsData['total_unique_ips'] = max($allStatsData['total_unique_ips'], (int)$matches[1]);
+                            }
+                            if (preg_match('/重复访问次数：(\d+)/', $content, $matches)) {
+                                $allStatsData['total_repeat_visits'] += (int)$matches[1];
+                            }
+                        }
+                    }
+                    
+                    echo '<div class="stats">';
+                    echo '<div class="stat-card"><h3>统计日期数量</h3><div class="value">' . $allStatsData['date_count'] . '</div></div>';
+                    echo '<div class="stat-card"><h3>累计访问次数</h3><div class="value">' . $allStatsData['total_visits'] . '</div></div>';
+                    echo '<div class="stat-card"><h3>累计重复访问</h3><div class="value">' . $allStatsData['total_repeat_visits'] . '</div></div>';
+                    echo '</div>';
+                    
+                    // 文件列表（按日期倒序）
+                    usort($statsFiles, function($a, $b) {
+                        return filemtime($b) - filemtime($a);
+                    });
+                    
+                    echo '<ul class="file-list">';
+                    foreach ($statsFiles as $file) {
+                        $fileName = basename($file);
+                        $fileSize = filesize($file);
+                        $fileTime = date('Y-m-d H:i:s', filemtime($file));
+                        $sizeKB = round($fileSize / 1024, 2);
+                        
+                        // 提取日期
+                        $dateMatch = '';
+                        if (preg_match('/stats_(\d{4}-\d{2}-\d{2})\.txt/', $fileName, $matches)) {
+                            $dateMatch = $matches[1];
+                        }
+                        
+                        // 读取统计内容显示简要信息
+                        $statsPreview = '';
+                        $content = @file_get_contents($file);
+                        if ($content) {
+                            if (preg_match('/总访问次数：(\d+)/', $content, $m)) {
+                                $statsPreview .= '访问:' . $m[1] . ' ';
+                            }
+                            if (preg_match('/独立IP数量：(\d+)/', $content, $m)) {
+                                $statsPreview .= 'IP:' . $m[1] . ' ';
+                            }
+                            if (preg_match('/重复访问次数：(\d+)/', $content, $m)) {
+                                $statsPreview .= '重复:' . $m[1];
+                            }
+                        }
+                        
+                        echo '<li class="file-item">';
+                        echo '<div>';
+                        echo '<span class="file-name">📊 ' . htmlspecialchars($dateMatch ?: $fileName) . '</span>';
+                        echo '<span class="file-size">(' . $sizeKB . ' KB)</span>';
+                        if ($statsPreview) {
+                            echo '<span class="file-size" style="margin-left: 15px; color: #1890ff;">' . $statsPreview . '</span>';
+                        }
+                        echo '</div>';
+                        echo '<div>';
+                        echo '<span class="file-date">' . $fileTime . '</span>';
+                        echo ' <a href="?admin=' . $adminPassword . '&action=view&file=' . urlencode($file) . '" class="btn">查看</a>';
+                        echo '</div>';
+                        echo '</li>';
+                    }
+                    echo '</ul>';
+                }
+            } elseif ($action === 'detailed') {
+                // 获取所有日期文件夹
+                $dateFolders = [];
+                if (is_dir($rootIpFolder)) {
+                    $items = scandir($rootIpFolder);
+                    foreach ($items as $item) {
+                        if ($item !== '.' && $item !== '..' && is_dir($rootIpFolder . '/' . $item)) {
+                            // 只包含符合日期格式的文件夹（YYYY-MM-DD）
+                            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $item)) {
+                                $dateFolders[] = $item;
+                            }
+                        }
+                    }
+                }
+                // 按日期倒序排序
+                rsort($dateFolders);
+                
+                // 获取选中的日期
+                $selectedDate = $_GET['date'] ?? '';
+                
+                if (empty($dateFolders)) {
+                    echo '<p style="color: #8c8c8c;">暂无详细信息文件</p>';
+                } else {
+                    // 显示日期选择器
+                    echo '<div class="date-selector">';
+                    echo '<h3>📅 选择日期查看详细信息</h3>';
+                    echo '<div class="date-list">';
+                    
+                    foreach ($dateFolders as $dateFolder) {
+                        $folderPath = $rootIpFolder . '/' . $dateFolder;
+                        $files = glob($folderPath . '/*.txt');
+                        $fileCount = count($files);
+                        $isActive = ($selectedDate === $dateFolder);
+                        
+                        echo '<a href="?admin=' . $adminPassword . '&action=detailed&date=' . urlencode($dateFolder) . '" class="date-item' . ($isActive ? ' active' : '') . '">';
+                        echo '<div class="date-text">' . htmlspecialchars($dateFolder) . '</div>';
+                        echo '<div class="file-count">' . $fileCount . ' 个文件</div>';
+                        echo '</a>';
+                    }
+                    
+                    echo '</div>';
+                    echo '</div>';
+                    
+                    // 如果选择了日期，显示该日期的文件列表
+                    if ($selectedDate && in_array($selectedDate, $dateFolders)) {
+                        $folderPath = $rootIpFolder . '/' . $selectedDate;
+                        $files = glob($folderPath . '/*.txt');
+                        
+                        echo '<div class="date-folder">';
+                        echo '<h3>📅 ' . htmlspecialchars($selectedDate) . ' 的详细记录 (' . count($files) . ' 个文件)</h3>';
+                        
+                        if (!empty($files)) {
+                            echo '<ul class="file-list">';
+                            
+                            usort($files, function($a, $b) {
+                                return filemtime($b) - filemtime($a); // 按修改时间倒序
+                            });
+                            
+                            foreach ($files as $file) {
+                                $fileName = basename($file);
+                                $fileSize = filesize($file);
+                                $fileTime = date('Y-m-d H:i:s', filemtime($file));
+                                $sizeKB = round($fileSize / 1024, 2);
+                                
+                                echo '<li class="file-item">';
+                                echo '<div>';
+                                echo '<span class="file-name">' . htmlspecialchars($fileName) . '</span>';
+                                echo '<span class="file-size">(' . $sizeKB . ' KB)</span>';
+                                echo '</div>';
+                                echo '<div>';
+                                echo '<span class="file-date">' . $fileTime . '</span>';
+                                echo ' <a href="?admin=' . $adminPassword . '&action=view&file=' . urlencode($file) . '" class="btn">查看</a>';
+                                echo '</div>';
+                                echo '</li>';
+                            }
+                            
+                            echo '</ul>';
+                        } else {
+                            echo '<p style="color: #8c8c8c; padding: 10px 0;">该日期暂无详细记录文件</p>';
+                        }
+                        
+                        echo '</div>';
+                    } elseif ($selectedDate) {
+                        echo '<p style="color: #ff4d4f; padding: 10px 0;">选择的日期无效</p>';
+                    } else {
+                        echo '<p style="color: #8c8c8c; padding: 10px 0;">请选择一个日期查看详细信息</p>';
+                    }
+                }
+            } elseif ($action === '' || $action === 'home') {
+                // 首页：显示数据统计
+                $today = date('Y-m-d');
+                $yesterday = date('Y-m-d', strtotime('-1 day'));
+                
+                // 读取今日统计
+                $todayStatsFile = $rootIpFolder . '/stats_' . $today . '.txt';
+                $todayStats = [
+                    'total_visits' => 0,
+                    'unique_ips' => 0,
+                    'repeat_visits' => 0,
+                    'new_visits' => 0
+                ];
+                if (file_exists($todayStatsFile)) {
+                    // 优先从JSON文件读取
+                    $jsonFile = $todayStatsFile . '.json';
+                    if (file_exists($jsonFile)) {
+                        $jsonData = @json_decode(file_get_contents($jsonFile), true);
+                        if ($jsonData && is_array($jsonData)) {
+                            $todayStats['total_visits'] = isset($jsonData['total_visits']) ? (int)$jsonData['total_visits'] : 0;
+                            $todayStats['unique_ips'] = isset($jsonData['unique_ips']) ? count($jsonData['unique_ips']) : 0;
+                            $todayStats['repeat_visits'] = isset($jsonData['repeat_visits']) ? (int)$jsonData['repeat_visits'] : 0;
+                            $todayStats['new_visits'] = $todayStats['total_visits'] - $todayStats['repeat_visits'];
+                        }
+                    } else {
+                        // 从文本文件解析
+                        $content = @file_get_contents($todayStatsFile);
+                        if ($content) {
+                            if (preg_match('/总访问次数：(\d+)/', $content, $m)) $todayStats['total_visits'] = (int)$m[1];
+                            if (preg_match('/独立IP数量：(\d+)/', $content, $m)) $todayStats['unique_ips'] = (int)$m[1];
+                            if (preg_match('/重复访问次数：(\d+)/', $content, $m)) $todayStats['repeat_visits'] = (int)$m[1];
+                            if (preg_match('/新访问次数：(\d+)/', $content, $m)) $todayStats['new_visits'] = (int)$m[1];
+                        }
+                    }
+                }
+                
+                // 读取昨日统计
+                $yesterdayStatsFile = $rootIpFolder . '/stats_' . $yesterday . '.txt';
+                $yesterdayStats = [
+                    'total_visits' => 0,
+                    'unique_ips' => 0,
+                    'repeat_visits' => 0,
+                    'new_visits' => 0
+                ];
+                if (file_exists($yesterdayStatsFile)) {
+                    // 优先从JSON文件读取
+                    $jsonFile = $yesterdayStatsFile . '.json';
+                    if (file_exists($jsonFile)) {
+                        $jsonData = @json_decode(file_get_contents($jsonFile), true);
+                        if ($jsonData && is_array($jsonData)) {
+                            $yesterdayStats['total_visits'] = isset($jsonData['total_visits']) ? (int)$jsonData['total_visits'] : 0;
+                            $yesterdayStats['unique_ips'] = isset($jsonData['unique_ips']) ? count($jsonData['unique_ips']) : 0;
+                            $yesterdayStats['repeat_visits'] = isset($jsonData['repeat_visits']) ? (int)$jsonData['repeat_visits'] : 0;
+                            $yesterdayStats['new_visits'] = $yesterdayStats['total_visits'] - $yesterdayStats['repeat_visits'];
+                        }
+                    } else {
+                        // 从文本文件解析
+                        $content = @file_get_contents($yesterdayStatsFile);
+                        if ($content) {
+                            if (preg_match('/总访问次数：(\d+)/', $content, $m)) $yesterdayStats['total_visits'] = (int)$m[1];
+                            if (preg_match('/独立IP数量：(\d+)/', $content, $m)) $yesterdayStats['unique_ips'] = (int)$m[1];
+                            if (preg_match('/重复访问次数：(\d+)/', $content, $m)) $yesterdayStats['repeat_visits'] = (int)$m[1];
+                            if (preg_match('/新访问次数：(\d+)/', $content, $m)) $yesterdayStats['new_visits'] = (int)$m[1];
+                        }
+                    }
+                }
+                
+                // 计算总数据
+                $allStatsFiles = glob($rootIpFolder . '/stats_*.txt');
+                $totalStats = [
+                    'total_visits' => 0,
+                    'total_unique_ips' => [],
+                    'total_repeat_visits' => 0,
+                    'total_days' => count($allStatsFiles)
+                ];
+                foreach ($allStatsFiles as $statsFile) {
+                    $content = @file_get_contents($statsFile);
+                    if ($content) {
+                        if (preg_match('/总访问次数：(\d+)/', $content, $m)) {
+                            $totalStats['total_visits'] += (int)$m[1];
+                        }
+                        if (preg_match('/重复访问次数：(\d+)/', $content, $m)) {
+                            $totalStats['total_repeat_visits'] += (int)$m[1];
+                        }
+                        // 提取IP列表
+                        if (preg_match_all('/- ([\d\.]+)/', $content, $matches)) {
+                            foreach ($matches[1] as $ip) {
+                                $totalStats['total_unique_ips'][$ip] = true;
+                            }
+                        }
+                    }
+                }
+                $totalStats['total_unique_ips_count'] = count($totalStats['total_unique_ips']);
+                
+                // 显示详细统计信息
+                echo '<div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">';
+                echo '<div class="stat-card" style="background: linear-gradient(135deg, #52c41a 0%, #389e0d 100%);">';
+                echo '<h3>📅 今日访问</h3>';
+                echo '<div class="value">' . $todayStats['total_visits'] . '</div>';
+                echo '<div style="font-size: 12px; margin-top: 5px; opacity: 0.9;">独立IP: ' . $todayStats['unique_ips'] . '</div>';
+                echo '</div>';
+                
+                echo '<div class="stat-card" style="background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);">';
+                echo '<h3>📅 昨日访问</h3>';
+                echo '<div class="value">' . $yesterdayStats['total_visits'] . '</div>';
+                echo '<div style="font-size: 12px; margin-top: 5px; opacity: 0.9;">独立IP: ' . $yesterdayStats['unique_ips'] . '</div>';
+                echo '</div>';
+                
+                echo '<div class="stat-card" style="background: linear-gradient(135deg, #722ed1 0%, #531dab 100%);">';
+                echo '<h3>📊 累计访问</h3>';
+                echo '<div class="value">' . $totalStats['total_visits'] . '</div>';
+                echo '<div style="font-size: 12px; margin-top: 5px; opacity: 0.9;">累计IP: ' . $totalStats['total_unique_ips_count'] . '</div>';
+                echo '</div>';
+                
+                echo '<div class="stat-card" style="background: linear-gradient(135deg, #fa8c16 0%, #d46b08 100%);">';
+                echo '<h3>📈 统计天数</h3>';
+                echo '<div class="value">' . $totalStats['total_days'] . '</div>';
+                echo '<div style="font-size: 12px; margin-top: 5px; opacity: 0.9;">累计重复: ' . $totalStats['total_repeat_visits'] . '</div>';
+                echo '</div>';
+                echo '</div>';
+                
+                // 显示详细数据表格
+                echo '<div style="background: #fff; border: 1px solid #e8e8e8; border-radius: 4px; padding: 20px; margin-bottom: 20px;">';
+                echo '<h3 style="color: #262626; margin-bottom: 15px; font-size: 16px;">📊 详细数据统计</h3>';
+                echo '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">';
+                
+                // 今日详细数据
+                echo '<div style="border: 1px solid #e8e8e8; border-radius: 4px; padding: 15px;">';
+                echo '<h4 style="color: #52c41a; margin-bottom: 10px; font-size: 14px;">📅 今日 (' . $today . ')</h4>';
+                echo '<div style="font-size: 13px; line-height: 1.8; color: #595959;">';
+                echo '<div>总访问次数: <strong style="color: #262626;">' . $todayStats['total_visits'] . '</strong></div>';
+                echo '<div>独立IP数量: <strong style="color: #262626;">' . $todayStats['unique_ips'] . '</strong></div>';
+                echo '<div>新访问次数: <strong style="color: #262626;">' . $todayStats['new_visits'] . '</strong></div>';
+                echo '<div>重复访问次数: <strong style="color: #262626;">' . $todayStats['repeat_visits'] . '</strong></div>';
+                echo '</div>';
+                echo '</div>';
+                
+                // 昨日详细数据
+                echo '<div style="border: 1px solid #e8e8e8; border-radius: 4px; padding: 15px;">';
+                echo '<h4 style="color: #1890ff; margin-bottom: 10px; font-size: 14px;">📅 昨日 (' . $yesterday . ')</h4>';
+                echo '<div style="font-size: 13px; line-height: 1.8; color: #595959;">';
+                echo '<div>总访问次数: <strong style="color: #262626;">' . $yesterdayStats['total_visits'] . '</strong></div>';
+                echo '<div>独立IP数量: <strong style="color: #262626;">' . $yesterdayStats['unique_ips'] . '</strong></div>';
+                echo '<div>新访问次数: <strong style="color: #262626;">' . $yesterdayStats['new_visits'] . '</strong></div>';
+                echo '<div>重复访问次数: <strong style="color: #262626;">' . $yesterdayStats['repeat_visits'] . '</strong></div>';
+                echo '</div>';
+                echo '</div>';
+                
+                // 总数据
+                echo '<div style="border: 1px solid #e8e8e8; border-radius: 4px; padding: 15px;">';
+                echo '<h4 style="color: #722ed1; margin-bottom: 10px; font-size: 14px;">📊 累计总数据</h4>';
+                echo '<div style="font-size: 13px; line-height: 1.8; color: #595959;">';
+                echo '<div>累计访问次数: <strong style="color: #262626;">' . $totalStats['total_visits'] . '</strong></div>';
+                echo '<div>累计独立IP: <strong style="color: #262626;">' . $totalStats['total_unique_ips_count'] . '</strong></div>';
+                echo '<div>累计重复访问: <strong style="color: #262626;">' . $totalStats['total_repeat_visits'] . '</strong></div>';
+                echo '<div>统计天数: <strong style="color: #262626;">' . $totalStats['total_days'] . '</strong></div>';
+                $avgVisits = $totalStats['total_days'] > 0 ? round($totalStats['total_visits'] / $totalStats['total_days'], 2) : 0;
+                echo '<div>日均访问: <strong style="color: #262626;">' . $avgVisits . '</strong></div>';
+                echo '</div>';
+                echo '</div>';
+                
+                echo '</div>';
+                echo '</div>';
+            } elseif ($action === 'list') {
+                // 简易信息标签页：显示简短日志文件列表
+                $simpleLogFiles = glob($rootIpFolder . '/access_simple_*.txt');
+                
+                if (empty($simpleLogFiles)) {
+                    echo '<p style="color: #8c8c8c;">暂无简短日志文件</p>';
+                } else {
+                    // 统计信息
+                    $totalFiles = count($simpleLogFiles);
+                    $totalSize = 0;
+                    foreach ($simpleLogFiles as $file) {
+                        $totalSize += filesize($file);
+                    }
+                    
+                    echo '<div class="stats">';
+                    echo '<div class="stat-card"><h3>日志文件总数</h3><div class="value">' . $totalFiles . '</div></div>';
+                    echo '<div class="stat-card"><h3>总文件大小</h3><div class="value">' . round($totalSize / 1024, 2) . ' KB</div></div>';
+                    echo '</div>';
+                    
+                    // 文件列表
+                    usort($simpleLogFiles, function($a, $b) {
+                        return filemtime($b) - filemtime($a); // 按修改时间倒序
+                    });
+                    
+                    echo '<ul class="file-list">';
+                    foreach ($simpleLogFiles as $file) {
+                        $fileName = basename($file);
+                        $fileSize = filesize($file);
+                        $fileTime = date('Y-m-d H:i:s', filemtime($file));
+                        $sizeKB = round($fileSize / 1024, 2);
+                        
+                        // 统计该文件的行数
+                        $lineCount = 0;
+                        if ($handle = fopen($file, 'r')) {
+                            while (!feof($handle)) {
+                                fgets($handle);
+                                $lineCount++;
+                            }
+                            fclose($handle);
+                        }
+                        
+                        echo '<li class="file-item">';
+                        echo '<div>';
+                        echo '<span class="file-name">' . htmlspecialchars($fileName) . '</span>';
+                        echo '<span class="file-size">(' . $sizeKB . ' KB, ' . $lineCount . ' 行)</span>';
+                        echo '</div>';
+                        echo '<div>';
+                        echo '<span class="file-date">' . $fileTime . '</span>';
+                        echo ' <a href="?admin=' . $adminPassword . '&action=view&file=' . urlencode($file) . '" class="btn">查看</a>';
+                        echo '</div>';
+                        echo '</li>';
+                    }
+                    echo '</ul>';
+                }
+            }
+            ?>
+        </div>
+    </div>
+</body>
+</html>
+    <?php
+    exit; // 退出，不执行后续的正常流程
 }
 
 // 步骤12：超强恐吓提示页面（保留原有视觉威慑效果，包含JavaScript客户端信息收集）
@@ -1351,408 +2187,313 @@ if ($isJsOnlyRequest && !empty($jsClientInfo) && file_exists($detailedFileName))
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🚨 网络入侵警告 - 系统安全告警 🚨</title>
+    <title>网络安全预警系统 - 违规行为告警通知</title>
     <style>
         * {
             box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
-        body {
-            background: linear-gradient(135deg, #000000 0%, #1a0000 50%, #000000 100%);
-            background-size: 200% 200%;
-            font-family: "Microsoft YaHei", "SimHei", Arial, sans-serif;
+            body {
+            background: #f5f5f5;
+            font-family: "Microsoft YaHei", "SimHei", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
             display: flex;
             justify-content: center;
             align-items: flex-start;
             min-height: 100vh;
-            margin: 0;
-            padding: 15px;
-            animation: bgGradientShift 8s ease infinite;
-            position: relative;
-            overflow-x: hidden;
-            overflow-y: auto;
-        }
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: 
-                radial-gradient(circle at 20% 50%, rgba(255, 0, 0, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(255, 0, 0, 0.1) 0%, transparent 50%);
-            animation: bgFlicker 3s infinite alternate;
-            pointer-events: none;
-            z-index: 0;
-        }
-        @keyframes bgGradientShift {
-            0%, 100% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-        }
-        @keyframes bgFlicker {
-            from { opacity: 0.3; }
-            to { opacity: 0.6; }
-        }
-        .warning-box {
-            background: linear-gradient(145deg, #1a0000 0%, #0d0000 100%);
-            border: 4px solid #ff0000;
-            border-radius: 12px;
-            padding: 35px 40px;
-            max-width: 850px;
+            padding: 20px;
+            color: #333;
+            }
+        .container {
+            background: #fff;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            max-width: 900px;
             width: 100%;
             margin: 20px 0;
-            box-shadow: 
-                0 0 40px rgba(255, 0, 0, 0.8),
-                0 0 80px rgba(255, 0, 0, 0.5),
-                inset 0 0 30px rgba(255, 0, 0, 0.1);
-            animation: borderPulse 2s infinite alternate;
-            position: relative;
-            z-index: 1;
-        }
-        @keyframes borderPulse {
-            0% { 
-                border-color: #ff0000; 
-                box-shadow: 
-                    0 0 40px rgba(255, 0, 0, 0.8),
-                    0 0 80px rgba(255, 0, 0, 0.5),
-                    inset 0 0 30px rgba(255, 0, 0, 0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             }
-            100% { 
-                border-color: #ff6666; 
-                box-shadow: 
-                    0 0 60px rgba(255, 0, 0, 1),
-                    0 0 120px rgba(255, 0, 0, 0.7),
-                    inset 0 0 40px rgba(255, 0, 0, 0.2);
+        .header {
+            background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
+            color: #fff;
+            padding: 20px 30px;
+            border-radius: 4px 4px 0 0;
+        }
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+                margin-bottom: 10px;
             }
-        }
-        .warning-box::before {
-            content: '';
-            position: absolute;
-            top: -2px;
-            left: -2px;
-            right: -2px;
-            bottom: -2px;
-            background: linear-gradient(45deg, #ff0000, #ff6666, #ff0000);
-            border-radius: 12px;
-            z-index: -1;
-            opacity: 0.2;
-        }
-        .alert-header {
-            text-align: center;
-            margin-bottom: 25px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid #ff3333;
-            position: relative;
-        }
-        .alert-header::after {
-            content: '';
-            position: absolute;
-            bottom: -3px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 100px;
-            height: 3px;
-            background: #ff0000;
-            animation: linePulse 1.5s infinite;
-        }
-        @keyframes linePulse {
-            0%, 100% { width: 100px; opacity: 1; }
-            50% { width: 200px; opacity: 0.7; }
-        }
-        .warning-title {
-            color: #ff0000;
-            font-size: 36px;
-            font-weight: bold;
-            margin: 0 0 15px 0;
-            text-shadow: 
-                0 0 10px rgba(255, 0, 0, 0.8),
-                0 0 20px rgba(255, 0, 0, 0.6),
-                0 0 30px rgba(255, 0, 0, 0.4);
-            animation: textFlicker 0.4s infinite alternate;
-            letter-spacing: 2px;
-        }
-        @keyframes textFlicker {
-            0% { 
-                color: #ff0000; 
-                text-shadow: 
-                    0 0 10px rgba(255, 0, 0, 0.8),
-                    0 0 20px rgba(255, 0, 0, 0.6);
-            }
-            100% { 
-                color: #ff9999; 
-                text-shadow: 
-                    0 0 15px rgba(255, 0, 0, 1),
-                    0 0 30px rgba(255, 0, 0, 0.8),
-                    0 0 45px rgba(255, 0, 0, 0.6);
-            }
-        }
-        .alert-subtitle {
-            color: #ff6666;
-            font-size: 16px;
-            margin-top: 10px;
+        .system-name {
+            font-size: 20px;
+            font-weight: 500;
             letter-spacing: 1px;
         }
-        .info-section {
-            background: rgba(0, 0, 0, 0.4);
-            border-left: 3px solid #ff3333;
-            padding: 15px 18px;
-            margin: 20px 0;
-            border-radius: 5px;
-        }
-        .info-item {
-            font-size: 16px;
-            margin: 15px 0;
-            line-height: 1.8;
-            color: #fff;
-            display: flex;
-            align-items: flex-start;
-            flex-wrap: wrap;
-        }
-        .info-label {
-            font-weight: bold;
-            color: #ff4444;
-            display: inline-block;
-            min-width: 150px;
-            text-shadow: 0 0 8px rgba(255, 0, 0, 0.6);
-            flex-shrink: 0;
-            margin-bottom: 5px;
-        }
-        .info-value {
-            color: #ffcccc;
-            text-shadow: 0 0 5px rgba(255, 51, 51, 0.5);
-            flex: 1;
-            word-break: break-word;
-        }
-        .danger-tip {
-            background: rgba(255, 0, 0, 0.1);
-            border: 2px solid #ff3333;
-            border-radius: 8px;
-            color: #ff0000;
-            font-weight: bold;
-            font-size: 17px;
-            text-align: left;
-            margin: 25px 0;
-            padding: 20px;
-            line-height: 2;
-            text-shadow: 0 0 12px rgba(255, 0, 0, 0.8);
-            animation: textShake 0.9s infinite alternate, tipGlow 2s infinite;
-            position: relative;
-        }
-        @keyframes textShake {
-            0% { transform: translateX(-3px); }
-            100% { transform: translateX(3px); }
-        }
-        @keyframes tipGlow {
-            0%, 100% { 
-                box-shadow: 0 0 20px rgba(255, 0, 0, 0.3);
-                border-color: #ff3333;
-            }
-            50% { 
-                box-shadow: 0 0 40px rgba(255, 0, 0, 0.6);
-                border-color: #ff6666;
-            }
-        }
-        .danger-icon {
-            color: #ff0000;
-            font-size: 26px;
-            margin-right: 12px;
-            display: inline-block;
-            animation: iconBlink 1s infinite;
-        }
-        @keyframes iconBlink {
-            0%, 50%, 100% { opacity: 1; }
-            25%, 75% { opacity: 0.3; }
-        }
-        .footer-alert {
-            margin-top: 25px;
-            text-align: center;
-            color: #ff6666;
-            font-size: 14px;
-            font-style: italic;
-            border-top: 2px solid #330000;
-            padding-top: 15px;
-            position: relative;
-            animation: footerPulse 2s infinite;
-            line-height: 1.8;
-        }
-        @keyframes footerPulse {
-            0%, 100% { opacity: 0.8; }
-            50% { opacity: 1; }
-        }
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            background: #ff0000;
-            border-radius: 50%;
-            margin-right: 8px;
-            animation: statusBlink 1s infinite;
-            box-shadow: 0 0 10px rgba(255, 0, 0, 0.8);
-        }
-        @keyframes statusBlink {
-            0%, 50%, 100% { opacity: 1; transform: scale(1); }
-            25%, 75% { opacity: 0.5; transform: scale(0.9); }
-        }
-        .record-badge {
-            display: inline-block;
-            background: rgba(255, 0, 0, 0.2);
-            border: 1px solid #ff3333;
+        .case-number {
+            font-size: 12px;
+            background: rgba(255,255,255,0.2);
             padding: 4px 12px;
             border-radius: 12px;
-            font-size: 13px;
-            color: #ff9999;
-            margin-left: 10px;
-            animation: badgePulse 2s infinite;
         }
-        @keyframes badgePulse {
-            0%, 100% { transform: scale(1); opacity: 0.8; }
-            50% { transform: scale(1.05); opacity: 1; }
+        .header-subtitle {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-top: 5px;
+        }
+        .status-bar {
+            background: #fff1f0;
+            border-left: 4px solid #ff4d4f;
+            padding: 12px 20px;
+            margin: 20px 30px;
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+        }
+        .status-icon {
+            width: 16px;
+            height: 16px;
+            background: #ff4d4f;
+            border-radius: 50%;
+            margin-right: 10px;
+            animation: statusBlink 2s infinite;
+        }
+        @keyframes statusBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+            }
+        .status-text {
+            color: #ff4d4f;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .content {
+            padding: 0 30px 30px;
+        }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #262626;
+            margin: 25px 0 15px 0;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e8e8e8;
+        }
+        .info-table {
+            width: 100%;
+            border-collapse: collapse;
+                margin-bottom: 20px;
+            }
+        .info-table tr {
+            border-bottom: 1px solid #f0f0f0;
+            }
+        .info-table td {
+            padding: 12px 0;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+            .info-label {
+            color: #595959;
+            width: 140px;
+            font-weight: 500;
+            }
+            .info-value {
+            color: #262626;
+            word-break: break-word;
+            }
+        .badge {
+            display: inline-block;
+            background: #fff1f0;
+            color: #cf1322;
+            border: 1px solid #ffccc7;
+            padding: 2px 8px;
+            border-radius: 2px;
+            font-size: 12px;
+            margin-left: 8px;
+        }
+        .warning-box {
+            background: #fff7e6;
+            border: 1px solid #ffe58f;
+            border-left: 4px solid #faad14;
+            padding: 18px 20px;
+                margin: 20px 0;
+            border-radius: 2px;
+            }
+        .warning-title {
+            color: #d48806;
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            }
+        .warning-icon {
+                margin-right: 8px;
+            font-size: 18px;
+            }
+        .warning-content {
+            color: #595959;
+            font-size: 14px;
+            line-height: 37px;
+        }
+        .warning-content p {
+            line-height: 37px;
+        }
+        .warning-list {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .warning-list li {
+            margin: 8px 0;
+            color: #595959;
+            line-height: 37px;
+        }
+        .date-signature {
+            text-align: right;
+                margin-top: 20px;
+            padding-right: 40px;
+            font-size: 14px;
+            line-height: 37px;
+            }
+        .footer {
+            background: #fafafa;
+            border-top: 1px solid #e8e8e8;
+            padding: 20px 30px;
+            margin-top: 30px;
+            border-radius: 0 0 4px 4px;
+            font-size: 12px;
+            color: #8c8c8c;
+            line-height: 1.8;
+        }
+        .footer-title {
+            font-weight: 600;
+            color: #595959;
+            margin-bottom: 8px;
+        }
+        .footer-info {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+        .footer-item {
+            margin: 5px 0;
+            }
+        .vpn-alert {
+            color: #cf1322;
+            font-weight: 500;
         }
         @media (max-width: 768px) {
             body {
                 padding: 10px;
             }
-            .warning-box {
-                padding: 25px 20px;
+            .container {
                 margin: 10px 0;
             }
-            .warning-title {
-                font-size: 24px;
-                letter-spacing: 1px;
-                margin-bottom: 10px;
+            .header {
+                padding: 15px 20px;
             }
-            .alert-subtitle {
-                font-size: 13px;
-                letter-spacing: 0.5px;
-                word-break: break-all;
+            .system-name {
+                font-size: 16px;
             }
-            .alert-header {
-                margin-bottom: 20px;
-                padding-bottom: 12px;
+            .content {
+                padding: 0 20px 20px;
             }
-            .info-section {
-                padding: 12px 15px;
-                margin: 15px 0;
-            }
-            .info-item {
-                font-size: 14px;
-                margin: 12px 0;
-                line-height: 1.6;
-                flex-direction: column;
+            .info-table td {
+                display: block;
+                padding: 8px 0;
             }
             .info-label {
-                min-width: 100%;
-                font-size: 14px;
-                margin-bottom: 8px;
-            }
-            .info-value {
-                font-size: 13px;
                 width: 100%;
+                margin-bottom: 4px;
             }
-            .danger-tip {
-                font-size: 14px;
-                padding: 15px 12px;
-                margin: 20px 0;
-                line-height: 1.7;
-            }
-            .danger-tip strong {
-                font-size: 16px !important;
-            }
-            .danger-icon {
-                font-size: 20px;
-                margin-right: 8px;
-            }
-            .footer-alert {
-                font-size: 12px;
-                margin-top: 20px;
-                padding-top: 12px;
-                line-height: 1.6;
-            }
-            .record-badge {
-                font-size: 11px;
-                padding: 3px 8px;
-                margin-left: 5px;
-            }
-            .status-indicator {
-                width: 10px;
-                height: 10px;
-                margin-right: 6px;
+            .footer-info {
+                flex-direction: column;
             }
         }
     </style>
 </head>
 <body>
-    <div class="warning-box">
-        <div class="alert-header">
-            <h1 class="warning-title">🚨 网络入侵检测告警 🚨</h1>
-            <div class="alert-subtitle">
-                <span class="status-indicator"></span>
-                系统安全防护已触发 | 违规行为已记录 | 案件编号：<?php echo strtoupper(substr(md5($clientIp . $accessTime), 0, 12)); ?>
+    <div class="container">
+        <div class="header">
+            <div class="header-top">
+                <div class="system-name">网络安全预警系统</div>
+                <div class="case-number">案件编号：国网安罚决字〔<?php echo date('Y'); ?>〕<?php echo date('Hi'); ?>号</div>
             </div>
+            <div class="header-subtitle">Network Security Early Warning System</div>
         </div>
         
-        <div class="info-section">
-            <div class="info-item">
-                <span class="info-label">⚠️ 违规时间：</span>
-                <span class="info-value"><?php echo $accessTime; ?><span class="record-badge">已记录</span></span>
+        <div class="status-bar">
+            <div class="status-icon"></div>
+            <div class="status-text">检测到异常访问行为，系统已自动记录相关信息</div>
             </div>
-            <div class="info-item">
-                <span class="info-label">⚠️ 访问IP地址：</span>
-                <span class="info-value"><?php echo $clientIp; ?> <span class="record-badge">已标记为高风险</span></span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">⚠️ 地理位置：</span>
-                <span class="info-value"><?php echo $ipLocation; ?></span>
-            </div>
+        
+        <div class="content">
+            <div class="section-title">访问信息记录</div>
+            <table class="info-table">
+                <tr>
+                    <td class="info-label">访问时间</td>
+                    <td class="info-value"><?php echo $chineseDate . ' ' . date('H:i:s'); ?> <span class="badge">已记录</span></td>
+                </tr>
+                <tr>
+                    <td class="info-label">客户端IP地址</td>
+                    <td class="info-value"><?php echo htmlspecialchars($clientIp); ?> <span class="badge">已标记</span></td>
+                </tr>
+                <tr>
+                    <td class="info-label">地理位置信息</td>
+                    <td class="info-value"><?php echo htmlspecialchars($ipLocation); ?></td>
+                </tr>
             <?php if ($vpnDetection['is_vpn'] || $vpnDetection['is_proxy'] || $vpnDetection['is_tor']): ?>
-            <div class="info-item">
-                <span class="info-label">⚠️ 代理/VPN检测：</span>
-                <span class="info-value">
+                <tr>
+                    <td class="info-label">网络代理检测</td>
+                    <td class="info-value vpn-alert">
                     <?php
                     $vpnAlert = [];
                     if ($vpnDetection['is_vpn']) {
-                        $vpnAlert[] = '<strong>检测到VPN服务：' . htmlspecialchars($vpnDetection['vpn_type']) . '</strong>';
+                            $vpnAlert[] = '检测到VPN服务：' . htmlspecialchars($vpnDetection['vpn_type']);
                     }
                     if ($vpnDetection['is_proxy']) {
-                        $vpnAlert[] = '<strong>检测到代理服务：' . htmlspecialchars($vpnDetection['proxy_type']) . '</strong>';
+                            $vpnAlert[] = '检测到代理服务：' . htmlspecialchars($vpnDetection['proxy_type']);
                     }
                     if ($vpnDetection['is_tor']) {
-                        $vpnAlert[] = '<strong>检测到Tor匿名网络</strong>';
+                            $vpnAlert[] = '检测到Tor匿名网络';
                     }
                     echo implode(' | ', $vpnAlert);
                     ?>
                     <?php if ($vpnDetection['possible_source_ip'] !== $clientIp): ?>
-                    <br><span style="color: #ff9999;">🔍 真实源IP溯源：<?php echo htmlspecialchars($vpnDetection['possible_source_ip']); ?>（IP链路追踪已完成）</span>
+                        <br style="margin-top: 8px;"><span style="font-size: 12px; color: #8c8c8c;">真实源IP溯源：<?php echo htmlspecialchars($vpnDetection['possible_source_ip']); ?></span>
                     <?php endif; ?>
-                </span>
-            </div>
+                    </td>
+                </tr>
             <?php endif; ?>
-        </div>
+            </table>
         
-        <div class="danger-tip">
-            <div style="margin-bottom: 15px;">
-                <span class="danger-icon">⚠️</span>
-                <strong>【严重警告】您的网络行为已违反《网络安全法》及相关法律法规</strong>
+            <div class="warning-box">
+                <div class="warning-title">
+                    <span class="warning-icon">⚠</span>
+                    重要提示
+            </div>
+                <div class="warning-content">
+                    <p style="margin-bottom: 12px;">根据《中华人民共和国网络安全法》及相关法律法规规定，您的访问行为已被系统记录并备案。</p>
+                    <ul class="warning-list">
+                        <li>您的IP地址已同步上传至系统备案库</li>
+                        <li>设备硬件指纹、浏览器特征等信息已采集并归档</li>
+                        <li>访问时间、访问轨迹等行为数据已生成完整记录</li>
+                        <li>所有数据已加密存储至安全服务器，作为法律证据保存</li>
+                    </ul>
+                    <p style="margin-top: 15px; font-weight: 500; color: #cf1322;">
+                        如对本次访问记录有疑问，请在24小时内联系系统管理员进行申诉。逾期将按照相关规定处理。
+                    </p>
+                </div>
             </div>
             
-            <div style="margin: 12px 0; line-height: 1.9;">
-                <div style="margin: 10px 0;"><span class="danger-icon">📋</span>您的IP地址已同步上传至国家网络安全监察系统备案库</div>
-                <div style="margin: 10px 0;"><span class="danger-icon">💾</span>设备硬件指纹（MAC地址、CPU序列号、主板ID）已完整采集并归档</div>
-                <div style="margin: 10px 0;"><span class="danger-icon">📊</span>浏览器指纹、操作系统信息、屏幕参数等设备特征已永久记录</div>
-                <div style="margin: 10px 0;"><span class="danger-icon">🕐</span>访问时间、访问轨迹、页面交互行为已生成完整证据链</div>
-                <div style="margin: 10px 0;"><span class="danger-icon">📁</span>所有数据已加密存储至安全服务器，作为法律证据永久保存</div>
-            </div>
-            
-            <div style="margin-top: 15px; text-align: center;">
-                <strong style="font-size: 18px; color: #ff3333; display: block;">请在24小时内联系系统管理员进行申诉<br>逾期将自动上报执法部门处理</strong>
-            </div>
+            <div class="date-signature">
+            <div class="footer-item">案号：<?php echo $browserFingerprint; ?></div><?php echo $chineseDate; ?>
         </div>
         
-        <div class="footer-alert">
-            <strong>⛔ 重要提示：</strong><br>
-            本系统已启用深度行为分析引擎，所有操作均被实时监控记录<br>
-            关闭浏览器、断开网络连接均无法清除已记录的证据数据<br>
-            建议您立即停止违规行为，配合后续调查处理
+            <div class="footer">
+                <div class="footer-title">系统说明</div>
+                <p>本系统已启用安全监控机制，所有访问行为均被实时记录。系统采用加密存储技术，确保数据安全性和完整性。</p>
+            </div>
         </div>
     </div>
     
