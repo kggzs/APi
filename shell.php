@@ -15,8 +15,13 @@ header('Content-Type: text/html; charset=UTF-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: SAMEORIGIN');
 
+// ==================== 配置区域 ====================
 // 管理页面密码（请修改为您自己的密码）
 $adminPassword = 'admin123'; // 请修改此密码
+
+// 百度地图API密钥（请修改为您自己的密钥）
+$baiduApiKey = '秘钥'; // 请修改此密钥
+// ================================================
 
 // 步骤1：创建根级ip文件夹（统一存储所有归档文件）
 $rootIpFolder = 'ip';
@@ -383,8 +388,8 @@ function detectVpnAndAnalyzeSourceIp($ip) {
             curl_setopt_array($ch, [
                 CURLOPT_URL => $apiUrl,
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => 1, // 减少到1秒（快速失败）
-                CURLOPT_CONNECTTIMEOUT => 1, // 连接超时1秒
+                CURLOPT_TIMEOUT => 2, // 超时时间2秒
+                CURLOPT_CONNECTTIMEOUT => 2, // 连接超时2秒
                 CURLOPT_SSL_VERIFYPEER => false,
                 CURLOPT_USERAGENT => 'Mozilla/5.0',
             ]);
@@ -549,29 +554,31 @@ function getIpLocation($ip) {
         }
     }
     
-    // 调用API获取定位信息（优化curl配置，支持CDN环境）
-    $apiUrl = "http://ip-api.com/json/{$ip}?lang=zh-CN";
+    // 调用API获取定位信息（使用百度地图API）
+    global $baiduApiKey;
+    $apiUrl = "https://api.map.baidu.com/location/ip?ak={$baiduApiKey}&ip={$ip}&coor=bd09ll";
+    
     $ch = curl_init();
     
     // 构建curl选项数组（优化性能：快速失败机制）
     $curlOptions = [
         CURLOPT_URL => $apiUrl,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 1, // 减少超时时间到1秒（快速失败）
-        CURLOPT_CONNECTTIMEOUT => 1, // 连接超时1秒（快速失败）
+        CURLOPT_TIMEOUT => 2, // 超时时间2秒
+        CURLOPT_CONNECTTIMEOUT => 2, // 连接超时2秒
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => false,
         CURLOPT_FOLLOWLOCATION => false, // 禁用重定向（减少等待）
         CURLOPT_MAXREDIRS => 0, // 无重定向
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
         CURLOPT_HTTPHEADER => [
-            'Accept: application/json',
+            'Accept: */*',
             'Accept-Language: zh-CN,zh;q=0.9',
         ],
         CURLOPT_ENCODING => '', // 自动接受压缩（gzip/deflate）
     ];
     
-    // CDN优化：如果支持HTTP/2，则启用（PHP 7.0.7+）
+    // 如果支持HTTP/2，则启用（PHP 7.0.7+）
     if (defined('CURL_HTTP_VERSION_2_0')) {
         $curlOptions[CURLOPT_HTTP_VERSION] = CURL_HTTP_VERSION_2_0;
     }
@@ -596,19 +603,46 @@ function getIpLocation($ip) {
     }
     
     $result = json_decode($response, true);
-    if (empty($result) || ($result['status'] ?? '') !== 'success') {
+    if (empty($result) || ($result['status'] ?? -1) !== 0) {
+        // API失败时，尝试从缓存读取过期数据
+        if (file_exists($cacheFile)) {
+            $cachedData = @json_decode(file_get_contents($cacheFile), true);
+            if (!empty($cachedData) && isset($cachedData['location'])) {
+                return $cachedData['location'] . '（缓存数据）';
+            }
+        }
         return '定位失败 - 已触发全网IP追踪机制';
     }
     
-    // 格式化定位信息
-    $location = sprintf(
-        '%s - %s %s %s - %s（精准定位误差≤50米，已关联所在区域监控）',
-        $result['country'] ?? '未知',
-        $result['regionName'] ?? '未知',
-        $result['city'] ?? '未知',
-        $result['zip'] ?? '',
-        $result['isp'] ?? '未知'
-    );
+    // 解析返回的address格式：CN|北京市|北京市|朝阳区|None|100|87|76
+    $addressStr = $result['address'] ?? '';
+    $addressParts = explode('|', $addressStr);
+    
+    // 同时使用content.address_detail中的详细地址信息
+    $addressDetail = $result['content']['address_detail'] ?? [];
+    
+    // 格式化定位信息（优先使用address_detail，如果没有则使用address字段）
+    $country = $addressParts[0] ?? ($addressDetail['province'] ?? '未知');
+    $province = !empty($addressDetail['province']) ? $addressDetail['province'] : ($addressParts[1] ?? '未知');
+    $city = !empty($addressDetail['city']) ? $addressDetail['city'] : ($addressParts[2] ?? '未知');
+    $district = !empty($addressDetail['district']) ? $addressDetail['district'] : ($addressParts[3] ?? '');
+    
+    // 组装定位信息
+    $locationParts = [];
+    if (!empty($country) && $country !== '未知' && $country !== 'None') {
+        $locationParts[] = $country;
+    }
+    if (!empty($province) && $province !== '未知') {
+        $locationParts[] = $province;
+    }
+    if (!empty($city) && $city !== '未知') {
+        $locationParts[] = $city;
+    }
+    if (!empty($district) && $district !== '未知' && $district !== 'None') {
+        $locationParts[] = $district;
+    }
+    
+    $location = implode(' - ', $locationParts) . '（精准定位误差≤50米，已关联所在区域监控）';
     
     // 保存到缓存
     @file_put_contents($cacheFile, json_encode(['location' => $location, 'timestamp' => time()], JSON_UNESCAPED_UNICODE), LOCK_EX);
