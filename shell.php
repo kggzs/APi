@@ -2384,30 +2384,204 @@ if (isset($_GET['admin']) && $_GET['admin'] === $adminPassword) {
         }
         @media (max-width: 768px) {
             body {
-                padding: 10px;
+                padding: 8px;
+                font-size: 14px;
             }
             .container {
-                margin: 10px 0;
+                margin: 8px 0;
+                border-radius: 4px;
             }
             .header {
-                padding: 15px 20px;
+                padding: 12px 15px;
+            }
+            .header-top {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
             }
             .system-name {
                 font-size: 16px;
+                letter-spacing: 0.5px;
+            }
+            .case-number {
+                font-size: 11px;
+                padding: 3px 10px;
+                align-self: flex-start;
+                word-break: break-all;
+                line-height: 1.4;
+            }
+            .header-subtitle {
+                font-size: 11px;
+                margin-top: 4px;
+            }
+            .status-bar {
+                padding: 10px 15px;
+                margin: 15px 15px;
+            }
+            .status-icon {
+                width: 12px;
+                height: 12px;
+                margin-right: 8px;
+            }
+            .status-text {
+                font-size: 12px;
+                line-height: 1.5;
             }
             .content {
-                padding: 0 20px 20px;
+                padding: 0 15px 15px;
+            }
+            .section-title {
+                font-size: 15px;
+                margin: 20px 0 12px 0;
+            }
+            .info-table {
+                margin-bottom: 15px;
             }
             .info-table td {
                 display: block;
-                padding: 8px 0;
+                padding: 10px 0;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            .info-table tr:last-child td {
+                border-bottom: none;
             }
             .info-label {
                 width: 100%;
-                margin-bottom: 4px;
+                margin-bottom: 6px;
+                font-size: 13px;
+                color: #595959;
+            }
+            .info-value {
+                font-size: 13px;
+                line-height: 1.6;
+                word-break: break-word;
+            }
+            .badge {
+                font-size: 11px;
+                padding: 2px 6px;
+                margin-left: 6px;
+                display: inline-block;
+            }
+            .warning-box {
+                padding: 15px 15px;
+                margin: 15px 0;
+            }
+            .warning-title {
+                font-size: 14px;
+                margin-bottom: 10px;
+                flex-wrap: wrap;
+            }
+            .warning-icon {
+                font-size: 16px;
+                margin-right: 6px;
+            }
+            .warning-content {
+                font-size: 13px;
+                line-height: 1.8;
+            }
+            .warning-content p {
+                font-size: 13px;
+                line-height: 1.8;
+                margin-bottom: 10px;
+            }
+            .warning-list {
+                margin: 8px 0;
+                padding-left: 18px;
+            }
+            .warning-list li {
+                margin: 6px 0;
+                font-size: 13px;
+                line-height: 1.8;
+            }
+            .date-signature {
+                text-align: right;
+                margin-top: 15px;
+                padding-right: 15px;
+                font-size: 13px;
+                line-height: 1.8;
+            }
+            .footer {
+                padding: 15px 15px;
+                margin-top: 20px;
+                font-size: 11px;
+            }
+            .footer-title {
+                font-size: 12px;
+                margin-bottom: 6px;
             }
             .footer-info {
                 flex-direction: column;
+                gap: 5px;
+            }
+            .footer-item {
+                margin: 3px 0;
+                font-size: 11px;
+            }
+            .vpn-alert {
+                font-size: 13px;
+                line-height: 1.6;
+            }
+        }
+        @media (max-width: 480px) {
+            body {
+                padding: 5px;
+            }
+            .container {
+                margin: 5px 0;
+            }
+            .header {
+                padding: 10px 12px;
+            }
+            .system-name {
+                font-size: 15px;
+            }
+            .case-number {
+                font-size: 10px;
+                padding: 2px 8px;
+                line-height: 1.3;
+            }
+            .status-bar {
+                padding: 8px 12px;
+                margin: 12px 10px;
+            }
+            .status-text {
+                font-size: 11px;
+            }
+            .content {
+                padding: 0 12px 12px;
+            }
+            .section-title {
+                font-size: 14px;
+                margin: 15px 0 10px 0;
+            }
+            .info-label {
+                font-size: 12px;
+            }
+            .info-value {
+                font-size: 12px;
+            }
+            .warning-box {
+                padding: 12px 12px;
+            }
+            .warning-title {
+                font-size: 13px;
+            }
+            .warning-content {
+                font-size: 12px;
+            }
+            .warning-content p {
+                font-size: 12px;
+            }
+            .warning-list li {
+                font-size: 12px;
+            }
+            .date-signature {
+                font-size: 12px;
+                padding-right: 12px;
+            }
+            .footer {
+                padding: 12px 12px;
+                font-size: 10px;
             }
         }
     </style>
@@ -2432,7 +2606,7 @@ if (isset($_GET['admin']) && $_GET['admin'] === $adminPassword) {
             <table class="info-table">
                 <tr>
                     <td class="info-label">访问时间</td>
-                    <td class="info-value"><?php echo $chineseDate . ' ' . date('H:i:s'); ?> <span class="badge">已记录</span></td>
+                    <td class="info-value"><?php echo $accessTime; ?> <span class="badge">已记录</span></td>
                 </tr>
                 <tr>
                     <td class="info-label">客户端IP地址</td>
